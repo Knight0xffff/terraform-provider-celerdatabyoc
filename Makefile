@@ -3,8 +3,8 @@ HOSTNAME=celerdata.com
 NAMESPACE=celerdata
 NAME=celerdatabyoc
 BINARY=terraform-provider-${NAME}
-VERSION=0.8.4
-OS_ARCH=linux_amd64
+VERSION=0.8.25
+OS_ARCH = $(shell go env GOOS)_$(shell go env GOARCH)
 
 default: install
 
