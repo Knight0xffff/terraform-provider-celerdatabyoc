@@ -1481,7 +1481,7 @@ func resourceElasticClusterV2Create(ctx context.Context, d *schema.ResourceData,
 	}
 
 	if stateResp.ClusterState == string(cluster.ClusterStateAbnormal) {
-		return diag.FromErr(errors.New(stateResp.AbnormalReason))
+		return diag.FromErr(abnormalErr(clusterId, "deploying the cluster", stateResp.AbnormalReason))
 	}
 	log.Printf("[DEBUG] deploy succeeded, action id:%s cluster id:%s]", resp.ActionID, resp.ClusterID)
 
@@ -2206,7 +2206,7 @@ func resourceElasticClusterV2Update(ctx context.Context, d *schema.ResourceData,
 	}
 
 	if stateResp.ClusterState == string(cluster.ClusterStateAbnormal) {
-		return diag.FromErr(errors.New(stateResp.AbnormalReason))
+		return diag.FromErr(abnormalErr(clusterId, "changing the cluster state", stateResp.AbnormalReason))
 	}
 
 	// Top-level flags (config-ish, must run before REDUCE so reductions see the right state)
@@ -2689,7 +2689,7 @@ func createWarehouse(ctx context.Context, clusterAPI cluster.IClusterAPI, cluste
 		}
 
 		if stateResp.ClusterState == string(cluster.ClusterStateAbnormal) {
-			return diag.FromErr(errors.New(stateResp.AbnormalReason))
+			return diag.FromErr(abnormalErr(clusterId, "creating warehouse", stateResp.AbnormalReason))
 		}
 	}
 
@@ -2951,7 +2951,7 @@ func updateWarehouse(ctx context.Context, req *UpdateWarehouseReq, multiAz bool)
 			}
 
 			if stateResp.ClusterState == string(cluster.ClusterStateAbnormal) {
-				return diag.FromErr(errors.New(stateResp.AbnormalReason))
+				return diag.FromErr(abnormalErr(clusterId, "updating warehouse", stateResp.AbnormalReason))
 			}
 		}
 	} else if req.customAmiChanged {
@@ -3241,7 +3241,7 @@ func deleteWarehouse(ctx context.Context, clusterAPI cluster.IClusterAPI, cluste
 		}
 
 		if stateResp.ClusterState == string(cluster.ClusterStateAbnormal) {
-			return diag.FromErr(errors.New(stateResp.AbnormalReason))
+			return diag.FromErr(abnormalErr(clusterId, "deleting warehouse", stateResp.AbnormalReason))
 		}
 	}
 	return diags
@@ -3347,7 +3347,7 @@ func resumeWarehouse(ctx context.Context, clusterAPI cluster.IClusterAPI, cluste
 		}
 
 		if stateResp.ClusterState == string(cluster.ClusterStateAbnormal) {
-			return diag.FromErr(errors.New(stateResp.AbnormalReason))
+			return diag.FromErr(abnormalErr(clusterId, "resuming warehouse", stateResp.AbnormalReason))
 		}
 	}
 	return diags
@@ -3462,7 +3462,7 @@ func handleFEScaleUp(ctx context.Context, d *schema.ResourceData, clusterAPI clu
 	}
 
 	if stateResp.ClusterState == string(cluster.ClusterStateAbnormal) {
-		return diag.FromErr(errors.New(stateResp.AbnormalReason))
+		return diag.FromErr(abnormalErr(clusterId, "scaling up coordinator nodes", stateResp.AbnormalReason))
 	}
 
 	return nil
@@ -3497,7 +3497,7 @@ func handleFEScaleUpAndUpgradeAMI(ctx context.Context, d *schema.ResourceData, c
 	}
 
 	if stateResp.ClusterState == string(cluster.ClusterStateAbnormal) {
-		return diag.FromErr(errors.New(stateResp.AbnormalReason))
+		return diag.FromErr(abnormalErr(clusterId, "scaling up coordinator nodes and upgrading the AMI", stateResp.AbnormalReason))
 	}
 
 	return nil
@@ -3532,7 +3532,7 @@ func handleFEScaleIn(ctx context.Context, d *schema.ResourceData, clusterAPI clu
 	}
 
 	if stateResp.ClusterState == string(cluster.ClusterStateAbnormal) {
-		return diag.FromErr(errors.New(stateResp.AbnormalReason))
+		return diag.FromErr(abnormalErr(clusterId, "scaling in coordinator nodes", stateResp.AbnormalReason))
 	}
 
 	return nil
@@ -3567,24 +3567,7 @@ func handleFEScaleOut(ctx context.Context, d *schema.ResourceData, clusterAPI cl
 	}
 
 	if stateResp.ClusterState == string(cluster.ClusterStateAbnormal) {
-		// AbnormalReason is not always populated. A scale-out that fails while the backend
-		// is still initializing the action comes back empty, and errors.New("") renders as
-		// terraform's "Empty Summary: This is always a bug in the provider ... report to
-		// the provider developers" -- which says nothing about the cluster and points the
-		// reader at the wrong bug. Measured on stage 2026-08-05 scaling a freshly converted
-		// cluster's coordinators 3 -> 5: the real reason was only in the backend log, and
-		// the following applies (once the rollback had a reason recorded) did surface it.
-		// So always name the operation, and append the reason only when there is one.
-		//
-		// The same bare errors.New(AbnormalReason) exists at ~16 other sites in this file
-		// and in resource_classic_cluster.go / resource_elastic_cluster.go; only the site
-		// this actually bit is changed here rather than sweeping paths this feature does
-		// not touch.
-		reason := stateResp.AbnormalReason
-		if len(reason) == 0 {
-			reason = "the backend reported no reason; check the cluster's action history"
-		}
-		return diag.FromErr(fmt.Errorf("cluster (%s) became abnormal while scaling out coordinator nodes: %s", d.Id(), reason))
+		return diag.FromErr(abnormalErr(clusterId, "scaling out coordinator nodes", stateResp.AbnormalReason))
 	}
 
 	return nil
@@ -3880,7 +3863,7 @@ func scaleWarehouseNum(ctx context.Context, clusterAPI cluster.IClusterAPI, clus
 	}
 
 	if stateResp.ClusterState == string(cluster.ClusterStateAbnormal) {
-		return errors.New(stateResp.AbnormalReason)
+		return abnormalErr(clusterId, "scaling warehouse compute nodes", stateResp.AbnormalReason)
 	}
 	return nil
 }
@@ -4126,7 +4109,7 @@ func handleWarehouseScaleUpAndUpgradeAMI(ctx context.Context, d *schema.Resource
 	}
 
 	if stateResp.ClusterState == string(cluster.ClusterStateAbnormal) {
-		return errors.New(stateResp.AbnormalReason)
+		return abnormalErr(clusterId, "scaling up warehouse nodes and upgrading the AMI", stateResp.AbnormalReason)
 	}
 
 	return nil
@@ -4375,6 +4358,28 @@ func getVolumeAutoscalingFromYaml(yamlConfig map[string]interface{}) (*cluster.V
 	}
 
 	return autoscalingConfig, nil
+}
+
+// abnormalErr builds the error for "the operation finished with the cluster in Abnormal".
+//
+// It exists because AbnormalReason is not always populated -- an action that fails while the
+// backend is still initializing it comes back empty, and the bare errors.New("") this code used
+// to return renders as terraform's "Empty Summary: This is always a bug in the provider and
+// should be reported to the provider developers". That message is about the wrong bug entirely:
+// it says nothing about the cluster, and it sends whoever reads it hunting in the provider.
+//
+// Measured on stage 2026-08-05: a coordinator 3 -> 5 scale-out on a freshly converted multi-AZ
+// cluster produced exactly that, hiding a backend workspace error; the warehouse scale-out that
+// ran next in the same suite produced it again from a different call site. Hence one helper and
+// every elastic_v2 wait site routed through it, rather than fixing them one bite at a time.
+//
+// resource_classic_cluster.go and resource_elastic_cluster.go carry the same bare pattern; they
+// are left alone because this feature does not touch those resources.
+func abnormalErr(clusterID, operation, abnormalReason string) error {
+	if len(abnormalReason) == 0 {
+		abnormalReason = "the backend reported no reason; check the cluster's action history"
+	}
+	return fmt.Errorf("cluster (%s) became abnormal while %s: %s", clusterID, operation, abnormalReason)
 }
 
 // suppressPinnedPolicyDiff makes an undeclared warehouse distribution_policy mean "whatever
