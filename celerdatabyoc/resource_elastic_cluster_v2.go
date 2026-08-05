@@ -187,10 +187,12 @@ func resourceElasticClusterV2() *schema.Resource {
 								CROSSING_AZ,
 								MULTI_AZ,
 							}, false),
+							DiffSuppressFunc: suppressPinnedPolicyDiff,
 						},
 						"specify_az": {
-							Type:     schema.TypeString,
-							Optional: true,
+							Type:             schema.TypeString,
+							Optional:         true,
+							DiffSuppressFunc: suppressPinnedSpecifyAzDiff,
 						},
 						"specified_azs": {
 							Type:             schema.TypeList,
@@ -323,10 +325,12 @@ func resourceElasticClusterV2() *schema.Resource {
 								CROSSING_AZ,
 								MULTI_AZ,
 							}, false),
+							DiffSuppressFunc: suppressPinnedPolicyDiff,
 						},
 						"specify_az": {
-							Type:     schema.TypeString,
-							Optional: true,
+							Type:             schema.TypeString,
+							Optional:         true,
+							DiffSuppressFunc: suppressPinnedSpecifyAzDiff,
 						},
 						"specified_azs": {
 							Type:             schema.TypeList,
@@ -822,6 +826,23 @@ func customizeEl2Diff(ctx context.Context, d *schema.ResourceDiff, m interface{}
 			return errors.New("The current cluster does not support disabling public access, the VPC endpoint config could not be found.")
 		}
 
+		// Direction first. A revert (multi-AZ -> single-AZ) is illegal whatever the
+		// warehouses look like, and the single-AZ branch below would otherwise reject it
+		// with "distribution_policy must be empty" -- a message about the wrong thing,
+		// since the conversion pins a policy the config never asked for (see
+		// suppressPinnedPolicyDiff) and the user cannot clear it while the cluster is on a
+		// multi-AZ network.
+		if netIDChanged {
+			o, _ := d.GetChange("network_id")
+			oldNetResp, err := networkAPI.GetNetwork(ctx, o.(string))
+			if err != nil {
+				return fmt.Errorf("get cluster's current network (%s): %s", o.(string), err.Error())
+			}
+			if err := validateMultiAzConversionTarget(oldNetResp.Network, netResp.Network); err != nil {
+				return err
+			}
+		}
+
 		if netResp.Network.MultiAz {
 			if coordinatorNodeCount < 3 {
 				if netIDChanged {
@@ -835,6 +856,8 @@ func customizeEl2Diff(ctx context.Context, d *schema.ResourceDiff, m interface{}
 			// warehouse level (celerdatabyoc_elastic_cluster_v2.warehouse /
 			// default_warehouse, or the change-distribution flow). Only the reverse
 			// direction (single-AZ network forbids a non-empty policy) is enforced below.
+			// Keeping that pinned state out of the plan's way is suppressPinnedPolicyDiff /
+			// suppressPinnedSpecifyAzDiff, on the two attributes themselves.
 
 			// specified_azs must reference AZ *names* that actually exist in the
 			// cluster network (e.g. "us-west-2a"), not AZ ids ("usw2-az1") or
@@ -879,17 +902,6 @@ func customizeEl2Diff(ctx context.Context, d *schema.ResourceDiff, m interface{}
 				if len(vMap["distribution_policy"].(string)) > 0 {
 					return errors.New("in single-AZ deployment mode, the distribution_policy parameter of warehouse must be empty")
 				}
-			}
-		}
-
-		if netIDChanged {
-			o, _ := d.GetChange("network_id")
-			oldNetResp, err := networkAPI.GetNetwork(ctx, o.(string))
-			if err != nil {
-				return fmt.Errorf("get cluster's current network (%s): %s", o.(string), err.Error())
-			}
-			if err := validateMultiAzConversionTarget(oldNetResp.Network, netResp.Network); err != nil {
-				return err
 			}
 		}
 	} else if netIDChanged {
@@ -3555,7 +3567,24 @@ func handleFEScaleOut(ctx context.Context, d *schema.ResourceData, clusterAPI cl
 	}
 
 	if stateResp.ClusterState == string(cluster.ClusterStateAbnormal) {
-		return diag.FromErr(errors.New(stateResp.AbnormalReason))
+		// AbnormalReason is not always populated. A scale-out that fails while the backend
+		// is still initializing the action comes back empty, and errors.New("") renders as
+		// terraform's "Empty Summary: This is always a bug in the provider ... report to
+		// the provider developers" -- which says nothing about the cluster and points the
+		// reader at the wrong bug. Measured on stage 2026-08-05 scaling a freshly converted
+		// cluster's coordinators 3 -> 5: the real reason was only in the backend log, and
+		// the following applies (once the rollback had a reason recorded) did surface it.
+		// So always name the operation, and append the reason only when there is one.
+		//
+		// The same bare errors.New(AbnormalReason) exists at ~16 other sites in this file
+		// and in resource_classic_cluster.go / resource_elastic_cluster.go; only the site
+		// this actually bit is changed here rather than sweeping paths this feature does
+		// not touch.
+		reason := stateResp.AbnormalReason
+		if len(reason) == 0 {
+			reason = "the backend reported no reason; check the cluster's action history"
+		}
+		return diag.FromErr(fmt.Errorf("cluster (%s) became abnormal while scaling out coordinator nodes: %s", d.Id(), reason))
 	}
 
 	return nil
@@ -4346,4 +4375,55 @@ func getVolumeAutoscalingFromYaml(yamlConfig map[string]interface{}) (*cluster.V
 	}
 
 	return autoscalingConfig, nil
+}
+
+// suppressPinnedPolicyDiff makes an undeclared warehouse distribution_policy mean "whatever
+// placement the backend pinned", not "clear it".
+//
+// A single-AZ -> multi-AZ conversion pins every previously-Unset warehouse to
+// SpecifyAZ/<primary az> (the backend's SetWarehousesBEDistributionSpecifyAZTx) without moving
+// a single node, and Read backfills that into state. A config that never declared a policy
+// reads back as "", so without this the first plan after a conversion is
+// `distribution_policy "specify_az" -> null` on every warehouse, and updateWarehouse turns that
+// into a ChangeWarehouseDistribution call with an empty policy, which the backend rejects with
+// "param distribution_policy is invalid" -- every apply after a successful conversion fails
+// until the user hand-copies the pinned values into their config. Measured on stage 2026-08-05:
+// it took out 6 of the elastic_v2_az_conversion e2e cases, starting with a plain re-apply of
+// the vars that had just succeeded.
+//
+// Only SPECIFY_AZ is absorbed. MULTI_AZ and CROSSING_AZ never reach state without a config
+// asking for them, so an emptied policy there is a real user-requested change and must still
+// reach the backend.
+func suppressPinnedPolicyDiff(_, old, new string, _ *schema.ResourceData) bool {
+	return new == "" && old == SPECIFY_AZ
+}
+
+// suppressPinnedSpecifyAzDiff does the same for specify_az, but only while its sibling
+// distribution_policy is itself being suppressed. Two reasons it has to be conditional:
+// ChangeWarehouseDistribution takes the pair, and updateWarehouse's
+// computeNodeDistributionChanged compares specify_az whenever the policy is SPECIFY_AZ -- so
+// absorbing the policy alone would still diff on the AZ and re-issue the rejected call. And
+// suppressing specify_az unconditionally would break a legitimate switch to MULTI_AZ (config
+// clears specify_az; a suppressed diff would leave the old AZ in place and trip
+// customizeEl2Diff's "specify_az must be empty when distribution_policy is multi_az").
+//
+// Resolving the sibling from the flattened key mirrors suppressSpecifiedAZsDiff. What it reads
+// is the sibling's EFFECTIVE value, after suppressPinnedPolicyDiff has already run on it:
+// terraform walks a block's attributes in sorted key order, so distribution_policy is resolved
+// before specify_az, and by this point a suppressed policy reads back as the pinned SPECIFY_AZ
+// rather than as the config's "" (verified against a converted stage cluster 2026-08-05 --
+// GetChange reports new == "specify_az" here, not ""). So the condition is simply "the policy
+// this warehouse ends up with is the pin": a config declaring some other policy reads back as
+// that policy and its specify_az is left to diff normally.
+func suppressPinnedSpecifyAzDiff(k, old, new string, d *schema.ResourceData) bool {
+	if new != "" || old == "" {
+		return false
+	}
+	policyKey := strings.TrimSuffix(k, "specify_az")
+	if policyKey == k {
+		return false
+	}
+	policyKey += "distribution_policy"
+	policy, _ := d.Get(policyKey).(string)
+	return policy == SPECIFY_AZ
 }

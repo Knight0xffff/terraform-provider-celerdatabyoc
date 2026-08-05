@@ -164,3 +164,73 @@ func TestValidateMultiAzConversionTarget(t *testing.T) {
 		})
 	}
 }
+
+func TestSuppressPinnedPolicyDiff(t *testing.T) {
+	tests := []struct {
+		name string
+		old  string // state
+		new  string // config
+		want bool   // suppress the diff?
+	}{
+		{
+			// The case this exists for: a conversion pinned the warehouse to SpecifyAZ and
+			// the config never declared a policy. Without suppression the plan is
+			// "specify_az" -> null, and the apply dies on "param distribution_policy is
+			// invalid".
+			name: "undeclared config over a pinned SpecifyAZ",
+			old:  SPECIFY_AZ,
+			new:  "",
+			want: true,
+		},
+		{
+			// MULTI_AZ only reaches state from an explicit config, so emptying it is a real
+			// user-requested change and has to reach the backend.
+			name: "undeclared config over MultiAZ is a real change",
+			old:  MULTI_AZ,
+			new:  "",
+			want: false,
+		},
+		{
+			name: "undeclared config over CrossingAZ is a real change",
+			old:  CROSSING_AZ,
+			new:  "",
+			want: false,
+		},
+		{
+			name: "declared config is never suppressed",
+			old:  SPECIFY_AZ,
+			new:  MULTI_AZ,
+			want: false,
+		},
+		{
+			// Declaring the pin explicitly produces no diff of its own; nothing to suppress.
+			name: "config restating the pin",
+			old:  SPECIFY_AZ,
+			new:  SPECIFY_AZ,
+			want: false,
+		},
+		{
+			// Single-AZ cluster: Read forces the policy to "" (see resourceElasticClusterV2Read),
+			// so there is no pin to absorb and the single-AZ validation still sees "".
+			name: "no policy on either side",
+			old:  "",
+			new:  "",
+			want: false,
+		},
+		{
+			// Create: the config asks for SpecifyAZ against empty state.
+			name: "declared on create",
+			old:  "",
+			new:  SPECIFY_AZ,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := suppressPinnedPolicyDiff("default_warehouse.0.distribution_policy", tt.old, tt.new, nil); got != tt.want {
+				t.Fatalf("suppressPinnedPolicyDiff(%q, %q) = %v, want %v", tt.old, tt.new, got, tt.want)
+			}
+		})
+	}
+}
