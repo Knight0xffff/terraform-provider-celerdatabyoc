@@ -224,6 +224,8 @@ The `celerdatabyoc_elastic_cluster_v2` resource contains the following required 
 
       ~> To enable Multi-AZ Deployment, you must deploy at least 3 coordinator nodes, that is, `coordinator_node_count` must be greater or equal to `3`.
 
+      Switching a `multi_az` warehouse back to `specify_az` takes one of two paths. Naming an AZ from the current `specified_azs` **and** setting `compute_node_count` to that AZ's existing share (`current_count / len(current_specified_azs)`) keeps those nodes and scales the other AZs in. Any other combination — an AZ outside `specified_azs`, or a different node count, such as resizing in the same change — replaces every compute node. To collapse and resize while keeping nodes, apply the two as separate changes, collapse first.
+
     - `specify_az`: (Optional, supported on AWS and GCP) The primary availability zone for node deployment. This argument is available only when `distribution_policy` is set to `specify_az`. AZ naming follows the cloud convention: `us-west-2a` on AWS, `us-central1-a` on GCP.
 
     - `specified_azs`: (Optional, supported on AWS and GCP) The list of availability zones across which compute nodes are evenly distributed. This argument is available only when `distribution_policy` is set to `multi_az`, and must contain 2 or 3 distinct AZs. `compute_node_count` must be a positive multiple of the length of this list. Changing the AZ count for an existing `multi_az` warehouse (e.g. 2→3 or 3→2) is supported in-place; the per-AZ node count is preserved and `compute_node_count` must equal `current_count × len(new_specified_azs) / len(current_specified_azs)`.
@@ -285,6 +287,8 @@ The `celerdatabyoc_elastic_cluster_v2` resource contains the following required 
       For more information, see [Multi-AZ Deployment](https://docs.celerdata.com/BYOC/docs/get_started/create_cluster/aws_cluster/multi-az/).
 
       ~> To enable Multi-AZ Deployment, you must deploy at least 3 Coordinator Nodes, that is, `coordinator_node_count` must be greater or equal to `3`.
+
+      Switching a `multi_az` warehouse back to `specify_az` takes one of two paths. Naming an AZ from the current `specified_azs` **and** setting `compute_node_count` to that AZ's existing share (`current_count / len(current_specified_azs)`) keeps those nodes and scales the other AZs in. Any other combination — an AZ outside `specified_azs`, or a different node count, such as resizing in the same change — replaces every compute node. To collapse and resize while keeping nodes, apply the two as separate changes, collapse first.
 
     - `specify_az`:  (Supported on AWS and GCP) The primary availability zone for node deployment. This argument is available only when `distribution_policy` is set to `specify_az`. AZ naming follows the cloud convention: `us-west-2a` on AWS, `us-central1-a` on GCP.
 
